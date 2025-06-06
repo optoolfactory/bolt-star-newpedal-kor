@@ -81,14 +81,14 @@ class CarController(CarControllerBase):
 
     if not long_active:
       self.regen_paddle_timer = max(self.regen_paddle_timer - 1, 0)
-      self.regen_paddle_pressed = self.regen_paddle_timer >= 20
+      self.regen_paddle_pressed = self.regen_paddle_timer >= 10
       return 0., False
 
     pedaloffset = interp(car_velocity, [0., 3, 6, 30], [0.10, 0.175, 0.240, 0.240])
     pedal_gas = clip((pedaloffset + accel * 0.6), 0.0, 1.0)
-    
+
     # Regen paddle hysteresis (frame‑based): count frames when decelerating hard, decrement only when truly released
-    if pedal_gas < 0.01 and accel < -0.7:
+    if pedal_gas < 0.05 and accel < -0.5:
       self.regen_paddle_timer += 1
     elif accel > -0.3:
       self.regen_paddle_timer = max(self.regen_paddle_timer - 1, 0)
@@ -111,7 +111,7 @@ class CarController(CarControllerBase):
     # pedal_gas = clip((pedaloffset + accel * 0.6), 0.0, 1.0)
     # raw_pedal_gas =  clip((pedaloffset + accel * 0.6), 0.0, 1.0)
     # raw_pedal_gas_with_paddle = clip((pedaloffset + (accel / gain) * 0.6), 0.0, 1.0)
-        # new raw value
+    # new raw value
 
     # # --- Blending logic: keep endpoints constant during blend ---
     # if self.regen_paddle_pressed_changed:
@@ -130,12 +130,12 @@ class CarController(CarControllerBase):
     # else:
     #   pedal_gas = raw_pedal_gas
 
-    
+
     # Safety cap on initial takeoff: limit pedal_gas based on vehicle speed
     pedal_gas_max = interp(car_velocity, [0.0, 5, 30], [0.22, 0.3225, 0.3650])
     pedal_gas = clip(pedal_gas, 0.0, pedal_gas_max)
 
-    return pedal_gas, self.regen_paddle_timer >= 20
+    return pedal_gas, self.regen_paddle_timer >= 10
 
   def _reset_spoof_state(self):
     """Reset all spoof-related state variables with enhanced safety"""
@@ -203,7 +203,7 @@ class CarController(CarControllerBase):
       self.CP.openpilotLongitudinalControl and
       CC.longActive and
       self.CP.enableGasInterceptor and
-      self.regen_paddle_timer >= 20  # raw hysteresis-only
+      self.regen_paddle_timer >= 10  # raw hysteresis-only
     )
 
     # === Enhanced Spoof scheduling: midpoint + overflow (~40Hz) ===
@@ -255,7 +255,7 @@ class CarController(CarControllerBase):
             self.spoof_message_count += 1
 
         # Overflow spoof: insert extra when accumulator allows
-        if (self.spoof_accum >= 0.6 and  # Reduced threshold
+        if (self.spoof_accum >= 0.7 and  # Reduced threshold
           not self.spoof_over_sent and
           self._is_timing_valid(now_nanos) and
           self.spoof_message_count < 50):  # Rate limit
@@ -265,7 +265,7 @@ class CarController(CarControllerBase):
             paddle_sends.append(gmcan.create_regen_paddle_command(self.packer_pt, CanBus.POWERTRAIN, True))
             self.last_spoof_ts_ns = now_nanos
             self.spoof_over_sent = True
-            self.spoof_accum = max(0.0, self.spoof_accum - 0.6)  # Ensure non-negative
+            self.spoof_accum = max(0.0, self.spoof_accum - 0.7)  # Ensure non-negative
             self.spoof_message_count += 1
     # === End Enhanced Spoof scheduling ===
 
