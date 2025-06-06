@@ -88,7 +88,7 @@ class CarController(CarControllerBase):
     pedal_gas = clip((pedaloffset + accel * 0.6), 0.0, 1.0)
 
     # Regen paddle hysteresis (frame‑based): count frames when decelerating hard, decrement only when truly released
-    if pedal_gas < 0.01 and accel < -0.7:
+    if pedal_gas < 0.05 and accel < -0.5:
       self.regen_paddle_timer += 1
     elif accel > -0.3:
       self.regen_paddle_timer = max(self.regen_paddle_timer - 1, 0)
