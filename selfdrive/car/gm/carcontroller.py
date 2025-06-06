@@ -44,7 +44,6 @@ class CarController(CarControllerBase):
     self.apply_steer_last = 0
     self.apply_gas = 0
     self.apply_brake = 0
-    self.apply_speed = 0
     self.frame = 0
     self.last_steer_frame = 0
     self.last_steer_ts_ns = 0
@@ -53,13 +52,10 @@ class CarController(CarControllerBase):
     self.last_spoof_ts_ns = 0
     self.last_button_frame = 0
     self.cancel_counter = 0
-    self.pedal_steady = 0.
 
     self.lka_steering_cmd_counter = 0
-    self.lka_icon_status_last = (False, False)
 
     self.params = CarControllerParams(self.CP)
-    self.params_ = Params()
 
     self.packer_pt = CANPacker(DBC[self.CP.carFingerprint]['pt'])
     self.packer_obj = CANPacker(DBC[self.CP.carFingerprint]['radar'])
@@ -68,14 +64,6 @@ class CarController(CarControllerBase):
     # FrogPilot variables
     self.pitch = FirstOrderFilter(0., 0.09 * 4, DT_CTRL * 4)  # runs at 25 Hz
     self.accel_g = 0.0
-    self.regen_paddle_pressed = False
-    self.aego = 0.0
-    self.regen_paddle_timer = 0
-
-    # Smoothing state for paddle blending
-    self.prev_regen_paddle_pressed = False
-    self.regen_paddle_pressed_changed = False
-    self.regen_paddle_pressed_changed_counter = 0
     self.regen_paddle_timer = 0
 
     # Enhanced spoof accumulator and flags with safety bounds
@@ -93,27 +81,17 @@ class CarController(CarControllerBase):
 
     if not long_active:
       self.regen_paddle_timer = max(self.regen_paddle_timer - 1, 0)
-      self.regen_paddle_pressed = self.regen_paddle_timer >= 20  # 30 frames
-      self.regen_paddle_pressed_changed = (self.regen_paddle_pressed != self.prev_regen_paddle_pressed)
-      self.prev_regen_paddle_pressed = self.regen_paddle_pressed
+      self.regen_paddle_pressed = self.regen_paddle_timer >= 20
       return 0., False
 
     pedaloffset = interp(car_velocity, [0., 3, 6, 30], [0.10, 0.175, 0.240, 0.240])
     pedal_gas = clip((pedaloffset + accel * 0.6), 0.0, 1.0)
+
     # Regen paddle hysteresis (frame‑based): count frames when decelerating hard, decrement only when truly released
     if pedal_gas < 0.01 and accel < -0.7:
       self.regen_paddle_timer += 1
     elif accel > -0.3:
       self.regen_paddle_timer = max(self.regen_paddle_timer - 1, 0)
-    # else: hold timer between -0.7 and -0.3
-
-    # Base paddle press hysteresis
-    self.regen_paddle_pressed = self.regen_paddle_timer >= 20  # 30 frames
-    press_regen_paddle = self.regen_paddle_pressed
-
-    # Detect press/release edges for smoothing
-    self.regen_paddle_pressed_changed = (self.regen_paddle_pressed != self.prev_regen_paddle_pressed)
-    self.prev_regen_paddle_pressed = self.regen_paddle_pressed
 
 
 
@@ -133,7 +111,7 @@ class CarController(CarControllerBase):
     # pedal_gas = clip((pedaloffset + accel * 0.6), 0.0, 1.0)
     # raw_pedal_gas =  clip((pedaloffset + accel * 0.6), 0.0, 1.0)
     # raw_pedal_gas_with_paddle = clip((pedaloffset + (accel / gain) * 0.6), 0.0, 1.0)
-        # new raw value
+    # new raw value
 
     # # --- Blending logic: keep endpoints constant during blend ---
     # if self.regen_paddle_pressed_changed:
@@ -152,10 +130,12 @@ class CarController(CarControllerBase):
     # else:
     #   pedal_gas = raw_pedal_gas
 
+
     # Safety cap on initial takeoff: limit pedal_gas based on vehicle speed
     pedal_gas_max = interp(car_velocity, [0.0, 5, 30], [0.22, 0.3225, 0.3650])
     pedal_gas = clip(pedal_gas, 0.0, pedal_gas_max)
-    return pedal_gas, press_regen_paddle
+
+    return pedal_gas, self.regen_paddle_timer >= 20
 
   def _reset_spoof_state(self):
     """Reset all spoof-related state variables with enhanced safety"""
@@ -205,7 +185,6 @@ class CarController(CarControllerBase):
 
   def update(self, CC, CS, now_nanos, frogpilot_toggles):
     self.CS = CS
-    self.aego = CS.out.aEgo
     actuators = CC.actuators
     accel = brake_accel = actuators.accel
     press_regen_paddle = False
@@ -226,7 +205,6 @@ class CarController(CarControllerBase):
       self.CP.enableGasInterceptor and
       self.regen_paddle_timer >= 20  # raw hysteresis-only
     )
-    regen_active = raw_regen_active
 
     # === Enhanced Spoof scheduling: midpoint + overflow (~40Hz) ===
     # Rising-edge reset on regen start
@@ -336,10 +314,6 @@ class CarController(CarControllerBase):
     steer_step = self.params.STEER_STEP if CC.latActive else self.params.INACTIVE_STEER_STEP
 
     if self.CP.networkLocation == NetworkLocation.fwdCamera:
-      # Also send at 50Hz:
-      # - on startup, first few msgs are blocked
-      # - until we're in sync with camera so counters align when relay closes, preventing a fault.
-      #   openpilot can subtly drift, so this is activated throughout a drive to stay synced
       out_of_sync = self.lka_steering_cmd_counter % 4 != (CS.cam_lka_steering_cmd_counter + 1) % 4
       if CS.loopback_lka_steering_cmd_ts_nanos == 0 or out_of_sync:
         steer_step = self.params.STEER_STEP
@@ -369,9 +343,8 @@ class CarController(CarControllerBase):
       idx = self.lka_steering_cmd_counter % 4
       can_sends.append(gmcan.create_steering_control(self.packer_pt, CanBus.POWERTRAIN, apply_steer, idx, CC.latActive))
 
-    # Update regen_active state and last_regen_paddle_pressed for next loop
-    self.last_regen_active = regen_active
-    self.last_regen_paddle_pressed = self.regen_paddle_pressed
+    # Update regen_active state for next loop
+    self.last_regen_active = raw_regen_active
 
     # ENHANCED: More robust timing validation for paddle sends with additional safety checks
     if paddle_sends and self._is_timing_valid(now_nanos) and len(paddle_sends) <= 4:  # Limit paddle messages
@@ -395,6 +368,7 @@ class CarController(CarControllerBase):
         at_full_stop = CC.longActive and CS.out.standstill
         near_stop = CC.longActive and (CS.out.vEgo < self.params.NEAR_STOP_BRAKE_PHASE)
         interceptor_gas_cmd = 0
+
         if not CC.longActive:
           # ASCM sends max regen when not enabled
           self.apply_gas = self.params.INACTIVE_REGEN
@@ -420,6 +394,7 @@ class CarController(CarControllerBase):
           # FIXME: brakes aren't applied immediately when enabling at a stop
           if stopping:
             self.apply_gas = self.params.INACTIVE_REGEN
+
           if self.CP.carFingerprint in CC_ONLY_CAR:
             # gas interceptor only used for full long control on cars without ACC
             interceptor_gas_cmd, press_regen_paddle = self.calc_pedal_command(actuators.accel, CC.longActive,
@@ -438,8 +413,10 @@ class CarController(CarControllerBase):
           if CC.longActive and CS.out.vEgo > self.CP.minEnableSpeed:
             # Using extend instead of append since the message is only sent intermittently
             can_sends.extend(gmcan.create_gm_cc_spam_command(self.packer_pt, self, CS, actuators))
+
         if self.CP.enableGasInterceptor:
           can_sends.append(create_gas_interceptor_command(self.packer_pt, interceptor_gas_cmd, idx))
+
         if self.CP.carFingerprint not in CC_ONLY_CAR:
           friction_brake_bus = CanBus.CHASSIS
           # GM Camera exceptions
