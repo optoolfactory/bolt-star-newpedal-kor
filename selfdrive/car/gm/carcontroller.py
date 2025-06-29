@@ -1,4 +1,5 @@
 from typing import Tuple
+from openpilot.common.swaglog import cloudlog
 from cereal import car
 from openpilot.common.conversions import Conversions as CV
 from openpilot.common.filter_simple import FirstOrderFilter
@@ -22,7 +23,7 @@ TransmissionType = car.CarParams.TransmissionType
 # Camera cancels up to 0.1s after brake is pressed, ECM allows 0.5s
 CAMERA_CANCEL_DELAY_FRAMES = 10
 # Enforce a minimum interval between steering messages to avoid a fault
-MIN_STEER_MSG_INTERVAL_MS = 10
+MIN_STEER_MSG_INTERVAL_MS = 15
 # Constants for pitch compensation
 PITCH_DEADZONE = 0.01  # [radians] 0.01 ≈ 1% grade
 BRAKE_PITCH_FACTOR_BP = [5., 10.]  # [m/s] smoothly revert to planned accel at low speeds
@@ -63,8 +64,6 @@ class CarController(CarControllerBase):
     self.aego = 0.0
     self.regen_paddle_timer = 0
 
-
-
     # Midpoint + overflow spoof accumulator and flags
     self.spoof_accum = 0.0
     self.spoof_mid_sent = False
@@ -89,7 +88,6 @@ class CarController(CarControllerBase):
     # Base paddle press hysteresis
     self.regen_paddle_pressed = self.regen_paddle_timer >= 20  # 30 frames
     press_regen_paddle = self.regen_paddle_pressed
-
 
     # Regen gain ratios from bin-averaged 60–0 deceleration sweep; Calculates stronger decel from paddle
     speed_mps = [0.559, 1.678, 2.797, 3.916, 5.035, 6.154, 7.273, 8.392, 9.511, 10.63,
@@ -129,6 +127,12 @@ class CarController(CarControllerBase):
     # Send CAN commands.
     can_sends = []
     paddle_sends = []
+    # Default guard thresholds to avoid undefined variables when not in regen
+    mid_guard_ns = 20_000_000
+    ofl_guard_ns = 26_000_000
+    # Default accumulation and threshold so they exist before dynamic update
+    credits_per_cycle = 0.0
+    overflow_thresh = 0.7
 
     raw_regen_active = (
       self.CP.carFingerprint in CC_REGEN_PADDLE_CAR and
@@ -151,6 +155,30 @@ class CarController(CarControllerBase):
     if raw_regen_active:
       # Interval between last two bus-0 steer sends
       interval_ns = self.last_steer_ts_ns - self.prev_steer_ts_ns
+      # Clamp interval to [20ms, 40ms] to handle jitter
+      interval_ns = clip(interval_ns, 20_000_000, 40_000_000)
+
+      # Compute dynamic guards with strict 5ms minimum (works on all, maximizes paddle on fast cars)
+      mid_guard_ns = max(5_000_000, int(interval_ns * 0.17))
+      mid_guard_ns = min(mid_guard_ns, interval_ns - 5_000_000)
+
+      ofl_guard_ns = max(mid_guard_ns + 1_000_000, int(interval_ns * 0.66))
+      ofl_guard_ns = min(ofl_guard_ns, interval_ns - 5_000_000)
+
+      # Log timing diagnostics for paddle spoofing
+      delta_after_ms = (now_nanos - self.last_steer_ts_ns) * 1e-6
+      next_steer_ns = self.prev_steer_ts_ns + interval_ns
+      delta_before_ms = (next_steer_ns - now_nanos) * 1e-6
+      cloudlog.error("paddle timing: mid_guard=%.1fms ofl_guard=%.1fms Δafter=%.1fms Δbefore=%.1fms credits=%.3f thresh=%.3f timer=%d accum=%.3f",
+                    mid_guard_ns * 1e-6, ofl_guard_ns * 1e-6,
+                    delta_after_ms, delta_before_ms,
+                    credits_per_cycle, overflow_thresh,
+                    self.regen_paddle_timer, self.spoof_accum)
+
+      # Dynamically compute overflow threshold to maintain ~40Hz spoof rate
+      # credits per cycle = (interval_s * 40) - 1
+      credits_per_cycle = (interval_ns / 1e9) * 40.0 - 1.0
+      overflow_thresh = clip(credits_per_cycle * 3.0, 0.5, 1.0)
 
       # New steer interval? clear per-interval flags
       if interval_ns != self.last_interval_ns:
@@ -159,26 +187,26 @@ class CarController(CarControllerBase):
         self.last_interval_ns = interval_ns
 
       # Accumulate extra spoofs needed above 33Hz base to reach 40Hz
-      self.spoof_accum += (40.0/33.0 - 1.0)
+      self.spoof_accum += credits_per_cycle
 
       # Midpoint spoof: one per interval
       if not self.spoof_mid_sent and interval_ns > 0:
         midpoint_ns = self.prev_steer_ts_ns + interval_ns // 2
-        if now_nanos >= midpoint_ns and now_nanos - self.last_steer_ts_ns >= 5_000_000:
+        if now_nanos >= midpoint_ns and now_nanos - self.last_steer_ts_ns >= mid_guard_ns:
           paddle_sends.append(gmcan.create_prndl2_command(self.packer_pt, CanBus.POWERTRAIN, True))
           paddle_sends.append(gmcan.create_regen_paddle_command(self.packer_pt, CanBus.POWERTRAIN, True))
           self.last_spoof_ts_ns = now_nanos
           self.spoof_mid_sent = True
 
       # Overflow spoof: insert extra when accumulator allows
-      if self.spoof_accum >= 0.7 and not self.spoof_over_sent and interval_ns > 0:
+      if self.spoof_accum >= overflow_thresh and not self.spoof_over_sent and interval_ns > 0:
         slot2_ns = self.prev_steer_ts_ns + (interval_ns * 2) // 3
-        if now_nanos >= slot2_ns and now_nanos - self.last_steer_ts_ns >= 5_000_000:
+        if now_nanos >= slot2_ns and now_nanos - self.last_steer_ts_ns >= ofl_guard_ns:
           paddle_sends.append(gmcan.create_prndl2_command(self.packer_pt, CanBus.POWERTRAIN, True))
           paddle_sends.append(gmcan.create_regen_paddle_command(self.packer_pt, CanBus.POWERTRAIN, True))
           self.last_spoof_ts_ns = now_nanos
           self.spoof_over_sent = True
-          self.spoof_accum -= 0.7
+          self.spoof_accum -= 0.5
     # === End Spoof scheduling ===
 
     # === Off-pulse scheduling on regen release ===
@@ -194,7 +222,7 @@ class CarController(CarControllerBase):
 
     if hasattr(self, "off_schedule_ns"):
       for i, t_ns in enumerate(self.off_schedule_ns):
-        if not self.off_sent[i] and now_nanos >= t_ns and now_nanos - self.last_steer_ts_ns >= 5_000_000:
+        if not self.off_sent[i] and now_nanos >= t_ns and now_nanos - self.last_steer_ts_ns >= mid_guard_ns:
           paddle_sends.append(gmcan.create_prndl2_command(self.packer_pt, CanBus.POWERTRAIN, False))
           paddle_sends.append(gmcan.create_regen_paddle_command(self.packer_pt, CanBus.POWERTRAIN, False))
           self.off_sent[i] = True
@@ -246,8 +274,8 @@ class CarController(CarControllerBase):
 
     # Merge paddle spoof CAN frames, time-guarded only
     if paddle_sends:
-      # wait at least 5 ms after the last bus0 steer send
-      if now_nanos - self.last_steer_ts_ns >= 5_000_000:
+      # wait at least mid_guard_ns after the last bus0 steer send
+      if now_nanos - self.last_steer_ts_ns >= mid_guard_ns:
         can_sends.extend(paddle_sends)
 
     if self.CP.openpilotLongitudinalControl:
@@ -334,8 +362,7 @@ class CarController(CarControllerBase):
 
           # Send dashboard UI commands (ACC status)
           send_fcw = hud_alert == VisualAlert.fcw
-          if self.frame % 10 == 5:
-            can_sends.append(gmcan.create_acc_dashboard_command(self.packer_pt, CanBus.POWERTRAIN, CC.enabled,
+          can_sends.append(gmcan.create_acc_dashboard_command(self.packer_pt, CanBus.POWERTRAIN, CC.enabled,
                                                               hud_v_cruise * CV.MS_TO_KPH, hud_control, send_fcw))
       else:
         # to keep accel steady for logs when not sending gas
@@ -345,11 +372,15 @@ class CarController(CarControllerBase):
       # and that ADAS is alive (5hz, previously 10hz)
       if not self.CP.radarUnavailable:
         tt = self.frame * DT_CTRL
-        time_and_headlights_step = 20
+        time_and_headlights_step = 10
         if self.frame % time_and_headlights_step == 0:
           idx = (self.frame // time_and_headlights_step) % 4
           can_sends.append(gmcan.create_adas_time_status(CanBus.OBSTACLE, int((tt - self.start_time) * 60), idx))
           can_sends.append(gmcan.create_adas_headlights_status(self.packer_obj, CanBus.OBSTACLE))
+
+        speed_and_accelerometer_step = 2
+        if self.frame % speed_and_accelerometer_step == 0:
+          idx = (self.frame // speed_and_accelerometer_step) % 4
           can_sends.append(gmcan.create_adas_steering_status(CanBus.OBSTACLE, idx))
           can_sends.append(gmcan.create_adas_accelerometer_speed_status(CanBus.OBSTACLE, CS.out.vEgo, idx))
 
@@ -381,7 +412,7 @@ class CarController(CarControllerBase):
 
     if self.CP.networkLocation == NetworkLocation.fwdCamera:
       # Silence "Take Steering" alert sent by camera, forward PSCMStatus with HandsOffSWlDetectionStatus=1
-      if self.frame % 20 == 0:
+      if self.frame % 10 == 0:
         can_sends.append(gmcan.create_pscm_status(self.packer_pt, CanBus.CAMERA, CS.pscm_status))
 
     new_actuators = actuators.as_builder()
