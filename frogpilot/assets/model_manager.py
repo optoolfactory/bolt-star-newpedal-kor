@@ -13,7 +13,7 @@ from openpilot.frogpilot.assets.download_functions import GITLAB_URL, download_f
 from openpilot.frogpilot.common.frogpilot_utilities import delete_file
 from openpilot.frogpilot.common.frogpilot_variables import DEFAULT_CLASSIC_MODEL, DEFAULT_MODEL, DEFAULT_TINYGRAD_MODEL, MODELS_PATH, params, params_default, params_memory
 
-VERSION = "v16"
+VERSION = "v17"
 
 CANCEL_DOWNLOAD_PARAM = "CancelModelDownload"
 DOWNLOAD_PROGRESS_PARAM = "ModelDownloadProgress"
@@ -24,6 +24,7 @@ class ModelManager:
   def __init__(self):
     self.available_models = (params.get("AvailableModels", encoding="utf-8") or "").split(",")
     self.model_versions = (params.get("ModelVersions", encoding="utf-8") or "").split(",")
+
 
     self.downloading_model = False
 
@@ -97,24 +98,96 @@ class ModelManager:
       self.downloading_model = False
       return
 
-    file_extension = "thneed" if self.model_versions[self.available_models.index(model_to_download)] in {"v1", "v2", "v3", "v4", "v5", "v6"} else "pkl"
-    model_path = MODELS_PATH / f"{model_to_download}.{file_extension}"
-    model_url = f"{repo_url}/Models/{model_to_download}.{file_extension}"
-    print(f"Downloading model: {model_to_download}")
-    download_file(CANCEL_DOWNLOAD_PARAM, model_path, DOWNLOAD_PROGRESS_PARAM, model_url, MODEL_DOWNLOAD_PARAM, params_memory)
-
-    if params_memory.get_bool(CANCEL_DOWNLOAD_PARAM):
-      handle_error(None, "Download cancelled...", "Download cancelled...", MODEL_DOWNLOAD_PARAM, DOWNLOAD_PROGRESS_PARAM, params_memory)
+    try:
+      model_index = self.available_models.index(model_to_download)
+      model_version = self.model_versions[model_index]
+    except Exception:
+      handle_error(None, f"Unknown model version for {model_to_download}! Download aborted.", "Model download failed", MODEL_DOWNLOAD_PARAM, DOWNLOAD_PROGRESS_PARAM, params_memory)
       self.downloading_model = False
       return
 
-    if verify_download(model_path, model_url):
-      print(f"Model {model_to_download} downloaded and verified successfully!")
+    if model_version in ("v8", "v9", "v10"):
+      # Download all PKL and metadata files for multi-file tinygrad models (v8 and v9)
+      filenames = [
+          f"{model_to_download}_driving_policy_tinygrad.pkl",
+          f"{model_to_download}_driving_vision_tinygrad.pkl",
+          f"{model_to_download}_driving_policy_metadata.pkl",
+          f"{model_to_download}_driving_vision_metadata.pkl",
+      ]
+      for filename in filenames:
+        model_path = MODELS_PATH / filename
+        model_url = f"{repo_url}/Models/{filename}"
+        print(f"Downloading model file: {filename}")
+        download_file(CANCEL_DOWNLOAD_PARAM, model_path, DOWNLOAD_PROGRESS_PARAM, model_url, MODEL_DOWNLOAD_PARAM, params_memory)
+
+        if params_memory.get_bool(CANCEL_DOWNLOAD_PARAM):
+          handle_error(None, "Download cancelled...", "Download cancelled...", MODEL_DOWNLOAD_PARAM, DOWNLOAD_PROGRESS_PARAM, params_memory)
+          self.downloading_model = False
+          return
+
+        if verify_download(model_path, model_url):
+          print(f"File {filename} downloaded and verified successfully!")
+          params_memory.put(DOWNLOAD_PROGRESS_PARAM, f"Downloaded {filename}!")
+        else:
+          self.handle_verification_failure(filename[:-4], model_path, "pkl")
+          self.downloading_model = False
+          return
+      # After all files are downloaded and verified
       params_memory.put(DOWNLOAD_PROGRESS_PARAM, "Downloaded!")
       params_memory.remove(MODEL_DOWNLOAD_PARAM)
-      self.downloading_model = False
+
+    elif model_version == "v7":
+      # Download both PKL and metadata for OG tinygrad models
+      v7_filenames = [
+        f"{model_to_download}.pkl",
+        f"{model_to_download}_metadata.pkl"
+      ]
+      for filename in v7_filenames:
+        model_path = MODELS_PATH / filename
+        model_url = f"{repo_url}/Models/{filename}"
+        print(f"Downloading v7 model file: {filename}")
+        download_file(CANCEL_DOWNLOAD_PARAM, model_path, DOWNLOAD_PROGRESS_PARAM, model_url, MODEL_DOWNLOAD_PARAM, params_memory)
+
+        if params_memory.get_bool(CANCEL_DOWNLOAD_PARAM):
+          handle_error(None, "Download cancelled...", "Download cancelled...", MODEL_DOWNLOAD_PARAM, DOWNLOAD_PROGRESS_PARAM, params_memory)
+          self.downloading_model = False
+          return
+
+        if verify_download(model_path, model_url):
+          print(f"File {filename} downloaded and verified successfully!")
+          params_memory.put(DOWNLOAD_PROGRESS_PARAM, f"Downloaded {filename}!")
+        else:
+          self.handle_verification_failure(filename.rsplit('.',1)[0], model_path, "pkl")
+          self.downloading_model = False
+          return
+
+      # Once both files are fetched
+      params_memory.put(DOWNLOAD_PROGRESS_PARAM, "Downloaded!")
+      params_memory.remove(MODEL_DOWNLOAD_PARAM)
+
     else:
-      self.handle_verification_failure(model_to_download, model_path, file_extension)
+      # Classic model: download only the .thneed file
+      file_extension = "thneed"
+      model_path = MODELS_PATH / f"{model_to_download}.{file_extension}"
+      model_url = f"{repo_url}/Models/{model_to_download}.{file_extension}"
+      print(f"Downloading classic model: {model_to_download}")
+      download_file(CANCEL_DOWNLOAD_PARAM, model_path, DOWNLOAD_PROGRESS_PARAM, model_url, MODEL_DOWNLOAD_PARAM, params_memory)
+
+      if params_memory.get_bool(CANCEL_DOWNLOAD_PARAM):
+        handle_error(None, "Download cancelled...", "Download cancelled...", MODEL_DOWNLOAD_PARAM, DOWNLOAD_PROGRESS_PARAM, params_memory)
+        self.downloading_model = False
+        return
+
+      if verify_download(model_path, model_url):
+        print(f"Model {model_to_download} downloaded and verified successfully!")
+        params_memory.put(DOWNLOAD_PROGRESS_PARAM, "Downloaded!")
+        params_memory.remove(MODEL_DOWNLOAD_PARAM)
+      else:
+        self.handle_verification_failure(model_to_download, model_path, file_extension)
+        self.downloading_model = False
+        return
+
+    self.downloading_model = False
 
   @staticmethod
   def copy_default_model():
@@ -132,11 +205,35 @@ class ModelManager:
 
   def check_models(self, boot_run, repo_url):
     available_models = set(self.available_models) - {DEFAULT_MODEL, DEFAULT_CLASSIC_MODEL}
-    downloaded_models = {path.stem for path in MODELS_PATH.iterdir() if path.is_file()} - {DEFAULT_MODEL, DEFAULT_CLASSIC_MODEL}
+    downloaded_models = set()
+    for model in available_models:
+      try:
+        model_index = self.available_models.index(model)
+        model_version = self.model_versions[model_index]
+      except Exception:
+        model_version = None
+
+      if model_version in ("v8", "v9", "v10"):
+        v8_v9_files = [
+          f"{model}_driving_policy_tinygrad.pkl",
+          f"{model}_driving_vision_tinygrad.pkl",
+          f"{model}_driving_policy_metadata.pkl",
+          f"{model}_driving_vision_metadata.pkl",
+        ]
+        if all((MODELS_PATH / f).is_file() for f in v8_v9_files):
+          downloaded_models.add(model)
+      elif model_version == "v7":
+        filename = f"{model}.pkl"
+        if (MODELS_PATH / filename).is_file():
+          downloaded_models.add(model)
+      else:
+        filename = f"{model}.thneed"
+        if (MODELS_PATH / filename).is_file():
+          downloaded_models.add(model)
 
     outdated_models = downloaded_models - available_models
     for model in outdated_models:
-      for model_file in MODELS_PATH.glob(f"{model}.*"):
+      for model_file in MODELS_PATH.glob(f"{model}*"):
         print(f"Removing outdated model: {model_file}")
         delete_file(model_file)
 
@@ -147,35 +244,51 @@ class ModelManager:
     if params.get("Model", encoding="utf-8") not in self.available_models + [DEFAULT_TINYGRAD_MODEL]:
       params.put("Model", params_default.get("Model", encoding="utf-8"))
 
-    automatically_download_models = not boot_run and params.get_bool("AutomaticallyDownloadModels")
+    automatically_download_models = params.get_bool("AutomaticallyDownloadModels")
     if not automatically_download_models:
       return
 
     model_sizes = self.fetch_all_model_sizes(repo_url)
     if not model_sizes:
-      print("No model size data available. Skipping model checks")
-      return
+      print("No model size data available. Continuing downloads based on file existence")
+      # do not return; proceed to download missing files
 
     needs_download = False
 
+    # Enhanced model file validation per model version
     for model in available_models:
-      expected_size = model_sizes.get(model)
-      if expected_size is None:
-        print(f"Size data for {model} not found in fetched metadata.")
-        continue
+      model_version = None
+      try:
+        model_index = self.available_models.index(model)
+        model_version = self.model_versions[model_index]
+      except Exception:
+        model_version = None
 
-      model_files = list(MODELS_PATH.glob(f"{model}.*"))
-      if not model_files:
-        needs_download = True
-        continue
-
-      for model_file in model_files:
-        if model_file.is_file():
-          local_size = model_file.stat().st_size
-          if local_size != expected_size:
-            print(f"Model {model} is outdated. Deleting {model_file}...")
-            delete_file(model_file)
+      if model_version in ("v8", "v9", "v10"):
+        v8_v9_files = [
+          f"{model}_driving_policy_tinygrad.pkl",
+          f"{model}_driving_vision_tinygrad.pkl",
+          f"{model}_driving_policy_metadata.pkl",
+          f"{model}_driving_vision_metadata.pkl",
+        ]
+        for filename in v8_v9_files:
+          path = MODELS_PATH / filename
+          expected_size = model_sizes.get(filename.rsplit(".", 1)[0])
+          if not path.is_file() or expected_size is None or path.stat().st_size != expected_size:
             needs_download = True
+            break
+      elif model_version == "v7":
+        filename = f"{model}.pkl"
+        path = MODELS_PATH / filename
+        expected_size = model_sizes.get(model)
+        if not path.is_file() or expected_size is None or path.stat().st_size != expected_size:
+          needs_download = True
+      else:
+        filename = f"{model}.thneed"
+        path = MODELS_PATH / filename
+        expected_size = model_sizes.get(model)
+        if not path.is_file() or expected_size is None or path.stat().st_size != expected_size:
+          needs_download = True
 
     if needs_download:
       self.download_all_models()
@@ -189,6 +302,24 @@ class ModelManager:
       params.put("ExperimentalModels", ",".join([model["id"] for model in model_info if model.get("experimental", False)]))
       params.put("ModelVersions", ",".join(self.model_versions))
       print("Models list updated successfully")
+
+      # --- Generate per-model version JSON for offline UI ---
+      try:
+          versions_file = MODELS_PATH / ".model_versions.json"
+          version_map = {model_id: version for model_id, version in zip(self.available_models, self.model_versions)}
+          with open(versions_file, "w") as vf:
+              json.dump(version_map, vf)
+      except Exception as e:
+          print(f"Failed to write .model_versions.json: {e}")
+      # --- end JSON generation ---
+
+      # Immediately sync the active ModelVersion param
+      try:
+          current = params.get("Model", encoding="utf-8")
+          if current in version_map:
+              params.put("ModelVersion", version_map[current])
+      except Exception as e:
+          print(f"Failed to sync ModelVersion for {current}: {e}")
 
   def update_models(self, boot_run=False):
     if self.downloading_model:
@@ -207,23 +338,46 @@ class ModelManager:
   def download_all_models(self):
     repo_url = get_repository_url()
     if not repo_url:
-      handle_error(None, "GitHub and GitLab are offline...", "Repository unavailable", MODEL_DOWNLOAD_PARAM, DOWNLOAD_PROGRESS_PARAM, params_memory)
+      handle_error(None, "GitHub and GitLab are offline...", "Repository unavailable", MODEL_DOWNLOAD_ALL_PARAM, DOWNLOAD_PROGRESS_PARAM, params_memory)
       return
 
     model_info = self.fetch_models(f"{repo_url}/Versions/model_names_{VERSION}.json")
     if model_info:
-      available_models = [model["id"] for model in model_info if model["id"] != DEFAULT_TINYGRAD_MODEL]
-      available_model_names = [re.sub(r"[🗺️👀📡]", "", model["name"]).strip() for model in model_info if model["id"] != DEFAULT_TINYGRAD_MODEL]
+      available_models = [model["id"] for model in model_info]
+      available_model_names = [re.sub(r"[🗺️👀📡]", "", model["name"]).strip() for model in model_info]
+      model_versions = [model["version"] for model in model_info]
 
-      for model, model_name in zip(available_models, available_model_names):
+      for model, model_name, model_version in zip(available_models, available_model_names, model_versions):
         if params_memory.get_bool(CANCEL_DOWNLOAD_PARAM):
           handle_error(None, "Download cancelled...", "Download cancelled...", MODEL_DOWNLOAD_ALL_PARAM, DOWNLOAD_PROGRESS_PARAM, params_memory)
           return
 
-        if not list(MODELS_PATH.glob(f"{model}.*")):
-          print(f"Model {model} is not downloaded. Preparing to download...")
-          params_memory.put(DOWNLOAD_PROGRESS_PARAM, f"Downloading \"{model_name}\"...")
-          self.download_model(model)
+        if model_version in ("v8", "v9", "v10"):
+          required_files = [
+              f"{model}_driving_policy_tinygrad.pkl",
+              f"{model}_driving_vision_tinygrad.pkl",
+              f"{model}_driving_policy_metadata.pkl",
+              f"{model}_driving_vision_metadata.pkl",
+          ]
+          missing = [f for f in required_files if not (MODELS_PATH / f).is_file()]
+          if missing:
+            print(f"Tinygrad model {model} is missing files. Preparing to download...")
+            params_memory.put(DOWNLOAD_PROGRESS_PARAM, f"Downloading \"{model_name}\"...")
+            self.download_model(model)
+        elif model_version == "v7":
+          # OG tinygrad: only need PKL file
+          model_file = MODELS_PATH / f"{model}.pkl"
+          if not model_file.is_file():
+            print(f"PKL model {model} is missing. Preparing to download...")
+            params_memory.put(DOWNLOAD_PROGRESS_PARAM, f"Downloading \"{model_name}\"...")
+            self.download_model(model)
+        else:
+          # Classic: only need .thneed
+          model_file = MODELS_PATH / f"{model}.thneed"
+          if not model_file.is_file():
+            print(f"Classic model {model} is missing. Preparing to download...")
+            params_memory.put(DOWNLOAD_PROGRESS_PARAM, f"Downloading \"{model_name}\"...")
+            self.download_model(model)
 
       params_memory.put(DOWNLOAD_PROGRESS_PARAM, "All models downloaded!")
     else:
