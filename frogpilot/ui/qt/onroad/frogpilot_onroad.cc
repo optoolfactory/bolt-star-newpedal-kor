@@ -26,18 +26,6 @@ void FrogPilotOnroadWindow::updateState(const UIState &s, const FrogPilotUIState
   showSignal = (turnSignalLeft || turnSignalRight) && frogpilot_toggles.value("signal_metrics").toBool();
   showSteering = frogpilot_toggles.value("steering_metrics").toBool();
 
-  // General timer management to prevent leaks on state changes (e.g., disengagement, gear shifts, param updates)
-  static bool prev_started = false;
-  if (s.scene.started != prev_started) {
-    if (!s.scene.started) {
-      signalTimer->stop();
-    } else if (showBlindspot || showSignal) {
-      int interval = showBlindspot ? 250 : 500;
-      signalTimer->start(interval);
-    }
-    prev_started = s.scene.started;
-  }
-
   if (showBlindspot || showFPS || showSignal || showSteering) {
     update();
   }

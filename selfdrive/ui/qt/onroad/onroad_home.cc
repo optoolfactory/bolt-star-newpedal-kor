@@ -65,18 +65,6 @@ void OnroadWindow::updateState(const UIState &s, const FrogPilotUIState &fs) {
     return;
   }
 
-  // Clear camera frames on major state changes to prevent buffer accumulation during param updates/transitions
-  static bool prev_started = false;
-  static bool prev_engaged = false;
-  static bool prev_has_alert = false;
-  bool has_alert = alerts->alertHeight > 0;
-  if (s.engaged() != prev_engaged || has_alert != prev_has_alert) {
-    nvg->stopVipcThread();  // Stop thread to clear buffers safely on engage/disengage/alert changes
-    prev_started = s.scene.started;
-    prev_engaged = s.engaged();
-    prev_has_alert = has_alert;
-  }
-
   if (s.scene.map_on_left) {
     split->setDirection(QBoxLayout::LeftToRight);
   } else {
