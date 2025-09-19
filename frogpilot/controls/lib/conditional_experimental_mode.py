@@ -34,15 +34,8 @@ class ConditionalExperimentalMode:
 
   @staticmethod
   def get_speed_based_param(speed_mph, param_array):
-    """Get parameter value based on current speed using breakpoints [0, 35, 55, 70]"""
-    if speed_mph < 35:
-        return param_array[0]
-    elif speed_mph < 55:
-        return param_array[1]
-    elif speed_mph < 70:
-        return param_array[2]
-    else:
-        return param_array[3]
+    """Get parameter value based on current speed using smooth interpolation between breakpoints [0, 35, 55, 70]"""
+    return interp(speed_mph, [0, 35, 55, 70], param_array)
 
   def __init__(self, FrogPilotPlanner):
     self.frogpilot_planner = FrogPilotPlanner
@@ -137,10 +130,9 @@ class ConditionalExperimentalMode:
     self.curve_detected = self.curvature_filter.x >= THRESHOLD and v_ego > CRUISING_SPEED
 
   def slow_lead(self, frogpilot_toggles, v_ego):
-    v_lead = self.frogpilot_planner.lead_one.vLead
     if self.frogpilot_planner.tracking_lead:
       slower_lead = frogpilot_toggles.conditional_slower_lead and self.frogpilot_planner.frogpilot_following.slower_lead
-      stopped_lead = frogpilot_toggles.conditional_stopped_lead and v_lead < 1
+      stopped_lead = frogpilot_toggles.conditional_stopped_lead and self.frogpilot_planner.lead_one.vLead < 1
       lead_threshold = scale_threshold(v_ego)
 
       # Adjust threshold based on lead probability for vision-only accuracy
@@ -157,15 +149,15 @@ class ConditionalExperimentalMode:
     if not sm["frogpilotCarState"].trafficModeEnabled:
       speed_mph = v_ego * CV.MS_TO_MPH  # Convert m/s to mph
 
-      # Interp for smooth scaling in 20-35 mph
-      bp = [0, 20, 35]
-      low_filter_time = 0.8  # Original fixed
-      tuned_filter_time_curves = self.FILTER_TIME_CURVES[1]  # At 35 mph
+      # Interp for smooth scaling in 35-45 mph
+      bp = [0, 35, 45]
+      low_filter_time = 0.0  # No filtering under 35 mph
+      tuned_filter_time_curves = self.FILTER_TIME_CURVES[1]  # At 35-55 mph
       tuned_filter_time_leads = self.FILTER_TIME_LEADS[1]
       tuned_filter_time_lights = self.FILTER_TIME_LIGHTS[1]
       low_boost = 1.0
       tuned_boost = self.LIGHT_BOOSTS[1]
-      low_cap_factor = 0.0  # No cap
+      low_cap_factor = 0.0  # No cap under 35 mph
       tuned_cap_factor = 1.0
 
       filter_time_curves = interp(speed_mph, bp, [low_filter_time, low_filter_time, tuned_filter_time_curves])
