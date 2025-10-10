@@ -400,19 +400,19 @@ class Controls:
       self.events.add(EventName.controlsdLagging)
 
     # Radar fault with frequency limiting (10 times in 30 seconds)
-    radar_fault_detected = len(self.sm['radarState'].radarErrors) or ((not self.rk.lagging or REPLAY) and not self.sm.all_checks(['radarState']))
-    if radar_fault_detected:
-      current_time = time.monotonic()
-      # Add current timestamp
-      self.radar_fault_timestamps.append(current_time)
-
-      # Clean up old timestamps outside the 30-second window
-      cutoff_time = current_time - self.radar_fault_window
-      self.radar_fault_timestamps = [t for t in self.radar_fault_timestamps if t > cutoff_time]
-
-      # Only add event if we have 10 or more faults in the 30-second window
-      if len(self.radar_fault_timestamps) >= self.radar_fault_threshold:
-        self.events.add(EventName.radarFault)
+    # radar_fault_detected = len(self.sm['radarState'].radarErrors) or ((not self.rk.lagging or REPLAY) and not self.sm.all_checks(['radarState']))
+    # if radar_fault_detected:
+    #   current_time = time.monotonic()
+    #   # Add current timestamp
+    #   self.radar_fault_timestamps.append(current_time)
+    #
+    #   # Clean up old timestamps outside the 30-second window
+    #   cutoff_time = current_time - self.radar_fault_window
+    #   self.radar_fault_timestamps = [t for t in self.radar_fault_timestamps if t > cutoff_time]
+    #
+    #   # Only add event if we have 10 or more faults in the 30-second window
+    #   if len(self.radar_fault_timestamps) >= self.radar_fault_threshold:
+    #     self.events.add(EventName.radarFault)
 
     if not self.sm.valid['pandaStates']:
       self.events.add(EventName.usbError)
